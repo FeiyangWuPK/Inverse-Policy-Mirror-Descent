@@ -25,7 +25,7 @@ LOG_STD_MIN = -20
 
 class Actor(BasePolicy):
     """
-    Actor network (policy) for SAC.
+    Actor network (policy) for PMD.
 
     :param observation_space: Obervation space
     :param action_space: Action space
@@ -174,7 +174,7 @@ class Actor(BasePolicy):
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
         # Note: the action is squashed
-        return self.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
+        return self.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs), self.action_dist.log_prob
 
     def action_log_prob(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
@@ -185,9 +185,9 @@ class Actor(BasePolicy):
         return self(observation, deterministic)
 
 
-class SACPolicy(BasePolicy):
+class PMDPolicy(BasePolicy):
     """
-    Policy class (with both actor and critic) for SAC.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -350,7 +350,10 @@ class SACPolicy(BasePolicy):
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        return self._predict(obs, deterministic=deterministic)
+        action, action_prob = self._predict(obs, deterministic=deterministic)
+        value = self.critic(obs, action)
+        log_prob = action_prob(obs)
+        return action, value, log_prob
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         return self.actor(observation, deterministic)
@@ -368,12 +371,12 @@ class SACPolicy(BasePolicy):
         self.training = mode
 
 
-MlpPolicy = SACPolicy
+MlpPolicy = PMDPolicy
 
 
-class CnnPolicy(SACPolicy):
+class CnnPolicy(PMDPolicy):
     """
-    Policy class (with both actor and critic) for SAC.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -442,9 +445,9 @@ class CnnPolicy(SACPolicy):
         )
 
 
-class MultiInputPolicy(SACPolicy):
+class MultiInputPolicy(PMDPolicy):
     """
-    Policy class (with both actor and critic) for SAC.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space

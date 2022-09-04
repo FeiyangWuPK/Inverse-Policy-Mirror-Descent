@@ -8,11 +8,10 @@ from gym import spaces
 from torch.nn import functional as F
 
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
-from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import explained_variance, get_schedule_fn
 from stable_baselines3.common import buffers
-from apmd_on.policies import SACPolicy
+from apmd_on.policies import MlpPolicy, CnnPolicy, MultiInputPolicy, PMDPolicy
 
 class APMD(OnPolicyAlgorithm):
     """
@@ -64,15 +63,15 @@ class APMD(OnPolicyAlgorithm):
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
     """
 
-    policy_aliases: Dict[str, Type[BasePolicy]] = {
-        "MlpPolicy": ActorCriticPolicy,
-        "CnnPolicy": ActorCriticCnnPolicy,
-        "MultiInputPolicy": MultiInputActorCriticPolicy,
+    policy_aliases: Dict[str, Type[MlpPolicy]] = {
+        "MlpPolicy": MlpPolicy,
+        "CnnPolicy": CnnPolicy,
+        "MultiInputPolicy": MultiInputPolicy,
     }
 
     def __init__(
         self,
-        policy: Union[str, Type[SACPolicy]],
+        policy: Union[str, Type[PMDPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         n_steps: int = 2048,
@@ -157,6 +156,7 @@ class APMD(OnPolicyAlgorithm):
         self.normalize_advantage = normalize_advantage
         self.target_kl = target_kl
         self.iter = 0
+        self.ent_coef_optimizer = None
 
         if _init_setup_model:
             self._setup_model()
@@ -185,28 +185,32 @@ class APMD(OnPolicyAlgorithm):
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
         # Update optimizer learning rate
-        self._update_learning_rate(self.policy.optimizer)
-        # Compute current clip range
-        clip_range = self.clip_range(self._current_progress_remaining)
-        # Optional: clip range for the value function
-        if self.clip_range_vf is not None:
-            clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
+        # Update optimizers learning rate
+        optimizers = [self.actor.optimizer, self.critic.optimizer]
+        if self.ent_coef_optimizer is not None:
+            optimizers += [self.ent_coef_optimizer]
+
+        # Update learning rate according to lr schedule
+        self._update_learning_rate(optimizers)
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
 
-        pg_losses, value_losses = [], []
-        clip_fractions = []
+        # # Compute current clip range
+        # clip_range = self.clip_range(self._current_progress_remaining)
+        # # Optional: clip range for the value function
+        # if self.clip_range_vf is not None:
+        #     clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
 
-        continue_training = True
+        # clip_fractions = []
+
+        # continue_training = True
 
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
-            approx_kl_divs = []
-            # Do a complete pass on the rollout buffer, no mini-batch used
+            
+            # Do a complete pass on the rollout buffer
             for rollout_data in self.rollout_buffer.get(self.batch_size):
                 actions = rollout_data.actions
-                average_reward_estimate = self.rollout_buffer.rewards.mean()
-
                 if isinstance(self.action_space, spaces.Discrete):
                     # Convert discrete action from float to long
                     actions = rollout_data.actions.long().flatten()
@@ -215,72 +219,24 @@ class APMD(OnPolicyAlgorithm):
                 if self.use_sde:
                     self.policy.reset_noise(self.batch_size)
 
-                # Action by the current actor for the sampled state
-                actions_pi, log_prob = self.actor.action_log_prob(rollout_data.observations)
-                log_prob = log_prob.reshape(-1, 1)
-
-                ent_coef_loss = None
-                if self.ent_coef_optimizer is not None:
-                    # Important: detach the variable from the graph
-                    # so we don't change it with other losses
-                    # see https://github.com/rail-berkeley/softlearning/issues/60
-                    ent_coef = th.exp(self.log_ent_coef.detach())
-                    ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
-                    ent_coef_losses.append(ent_coef_loss.item())
-                else:
-                    ent_coef = self.ent_coef_tensor
-
-                ent_coefs.append(ent_coef.item())
-
-                # Optimize entropy coefficient, also called
-                # entropy temperature or alpha in the paper
-                if ent_coef_loss is not None:
-                    self.ent_coef_optimizer.zero_grad()
-                    ent_coef_loss.backward()
-                    self.ent_coef_optimizer.step()
- 
+                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
+                values = values.flatten()
                 # Normalize advantage
                 advantages = rollout_data.advantages
-                if self.normalize_advantage:
+                # Normalization does not make sense if mini batchsize == 1, see GH issue #325
+                if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                K = self._total_timesteps / self.n_steps
-                t = 1 / (1 - min(self.iter, K)/K)
-                
-                # Perform SGD for m iterations
-                old_log_prob = None
-                # values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
-                # values = values.flatten()
-
-                with th.no_grad():
-                    # Select action according to policy
-                    next_actions, next_log_prob = self.actor.action_log_prob(rollout_data.next_observations)
-                    # Compute the next Q values: min over all critics targets
-                    next_q_values = th.cat(self.critic_target(rollout_data.next_observations, next_actions), dim=1)
-                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-                    # add entropy term
-                    next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
-                    # td error + entropy term
-                    target_q_values = rollout_data.rewards + (1 - rollout_data.dones) * self.gamma * next_q_values - (self.gamma==1) * average_reward_estimate
-
-                if old_log_prob is None: # make sure only store the first one
-                    old_log_prob = rollout_data.old_log_prob
                 # ratio between old and new policy, should be one at the first iteration
-                ratio = th.exp(log_prob - old_log_prob)
-                
-                log_ratio = log_prob - old_log_prob
-                # approximate KL divergence according to [John Schulman's blog](http://joschu.net/blog/kl-approx.html)
-                approx_kl_div = th.mean(ratio*log_ratio - ratio + 1)
-                # approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio)
-                # vanilla KL
-                # approx_kl_div = th.mean(th.exp(log_prob) * log_ratio)
+                ratio = th.exp(log_prob - rollout_data.old_log_prob)
 
-                policy_loss = -1 * th.mean(ratio*advantages - t * approx_kl_div)
+                # TODO
+                policy_loss = 
 
                 # Logging
-                pg_losses.append(policy_loss.item())
-                clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
+                # pg_losses.append(policy_loss.item())
+                # clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                # clip_fractions.append(clip_fraction)
 
                 # if self.clip_range_vf is None:
                 #     # No clipping
@@ -288,42 +244,34 @@ class APMD(OnPolicyAlgorithm):
                 # else:
                 #     # Clip the different between old and new value
                 #     # NOTE: this depends on the reward scaling
-                #      values_pred = rollout_data.old_values + th.clamp(
+                #     values_pred = rollout_data.old_values + th.clamp(
                 #         values - rollout_data.old_values, -clip_range_vf, clip_range_vf
                 #     )
-                # Get current Q-values estimates for each critic network
-                # using action from the replay buffer
-                current_q_values = self.critic(rollout_data.observations, rollout_data.actions)
 
-                # Compute critic loss
-                critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
-                critic_losses.append(critic_loss.item())
-                
-                self.policy.optimizer.zero_grad()
+                # TODO make SAC style loss - average reward estimation
+                # Value loss using the TD(gae_lambda) target
+                # value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                # value_losses.append(value_loss.item())
 
-                total_loss = critic_loss + policy_loss
-                total_loss.backward()
-                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
+                # Entropy loss favor exploration
+                if entropy is None:
+                    # Approximate entropy when no analytical form
+                    entropy_loss = -th.mean(-log_prob)
+                else:
+                    entropy_loss = -th.mean(entropy)
 
-                # # Entropy loss favor exploration
-                # if entropy is None:
-                #     # Approximate entropy when no analytical form
-                #     entropy_loss = -th.mean(-log_prob)
-                # else:
-                #     entropy_loss = -th.mean(entropy)
-                    
+                # entropy_losses.append(entropy_loss.item())
+
+                # loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+
                 # Calculate approximate form of reverse KL Divergence for early stopping
                 # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
                 # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
                 # and Schulman blog: http://joschu.net/blog/kl-approx.html
-                vanilla_kl = 0.0
-                with th.no_grad():
-                    vanilla_kl = approx_kl_div.cpu().numpy()
-                    log_ratio = log_prob - old_log_prob
-                    # approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    approx_kl_div = th.mean(ratio*log_ratio - ratio + 1).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
+                # with th.no_grad():
+                #     log_ratio = log_prob - rollout_data.old_log_prob
+                #     approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                #     approx_kl_divs.append(approx_kl_div)
 
                 # if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
                 #     continue_training = False
@@ -331,8 +279,15 @@ class APMD(OnPolicyAlgorithm):
                 #         print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
                 #     break
 
-            if not continue_training:
-                break
+                # Optimization step
+                self.policy.optimizer.zero_grad()
+                loss.backward()
+                # Clip grad norm
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.policy.optimizer.step()
+
+            # if not continue_training:
+            #     break
 
         self._n_updates += self.n_epochs
         explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
@@ -341,19 +296,13 @@ class APMD(OnPolicyAlgorithm):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kl_divs[-1]))
-        self.logger.record("train/KL", vanilla_kl)
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
-        self.logger.record("train/loss", total_loss.item())
+        self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
+        self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/clip_range", clip_range)
-        if self.clip_range_vf is not None:
-            self.logger.record("train/clip_range_vf", clip_range_vf)
-        self.iter += 1
 
     def learn(
         self,
