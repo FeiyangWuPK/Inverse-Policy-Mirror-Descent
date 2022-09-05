@@ -11,22 +11,24 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.sac.policies import CnnPolicy, MlpPolicy, MultiInputPolicy, SACPolicy
+from stable_baselines3.sac.policies import CnnPolicy, MlpPolicy, MultiInputPolicy, PMDPolicy
 
 
-class SAC(OffPolicyAlgorithm):
+class PMD(OffPolicyAlgorithm):
     """
-    Soft Actor-Critic (SAC)
-    Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
+    Policy Mirror Descent (PMD)
+    On-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
     This implementation borrows code from original implementation (https://github.com/haarnoja/sac)
     from OpenAI Spinning Up (https://github.com/openai/spinningup), from the softlearning repo
     (https://github.com/rail-berkeley/softlearning/)
     and from Stable Baselines (https://github.com/hill-a/stable-baselines)
     Paper: https://arxiv.org/abs/1801.01290
-    Introduction to SAC: https://spinningup.openai.com/en/latest/algorithms/sac.html
+    Introduction to PMD: https://spinningup.openai.com/en/latest/algorithms/sac.html
 
     Note: we use double q target and not value target as discussed
     in https://github.com/hill-a/stable-baselines/issues/270
+
+    ## Notice that it inherited offpolicy algorithm but I modified the learning process so that it reset buffer after policy updates and don't re-sample action from the policy network.
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
@@ -52,7 +54,7 @@ class SAC(OffPolicyAlgorithm):
         at a cost of more complexity.
         See https://github.com/DLR-RM/stable-baselines3/issues/37#issuecomment-637501195
     :param ent_coef: Entropy regularization coefficient. (Equivalent to
-        inverse of reward scale in the original SAC paper.)  Controlling exploration/exploitation trade-off.
+        inverse of reward scale in the original PMD paper.)  Controlling exploration/exploitation trade-off.
         Set it to 'auto' to learn it automatically (and 'auto_0.1' for using 0.1 as initial value)
     :param target_update_interval: update the target network every ``target_network_update_freq``
         gradient steps.
@@ -81,7 +83,7 @@ class SAC(OffPolicyAlgorithm):
 
     def __init__(
         self,
-        policy: Union[str, Type[SACPolicy]],
+        policy: Union[str, Type[PMDPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = 1_000_000,  # 1e6
@@ -314,7 +316,7 @@ class SAC(OffPolicyAlgorithm):
         eval_env: Optional[GymEnv] = None,
         eval_freq: int = -1,
         n_eval_episodes: int = 5,
-        tb_log_name: str = "SAC",
+        tb_log_name: str = "PMD",
         eval_log_path: Optional[str] = None,
         reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
