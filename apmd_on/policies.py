@@ -1,3 +1,4 @@
+import copy
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -25,7 +26,7 @@ LOG_STD_MIN = -20
 
 class Actor(BasePolicy):
     """
-    Actor network (policy) for PMD.
+    Actor network (policy) for SAC.
 
     :param observation_space: Obervation space
     :param action_space: Action space
@@ -174,7 +175,7 @@ class Actor(BasePolicy):
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
         # Note: the action is squashed
-        return self.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs), self.action_dist.log_prob
+        return self.action_dist.actions_from_params(mean_actions, log_std, deterministic=deterministic, **kwargs)
 
     def action_log_prob(self, obs: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
@@ -291,6 +292,8 @@ class PMDPolicy(BasePolicy):
     def _build(self, lr_schedule: Schedule) -> None:
         self.actor = self.make_actor()
         self.actor.optimizer = self.optimizer_class(self.actor.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+        self.old_actor = copy.deepcopy(self.actor)
+        self.old_actor.optimizer = None
 
         if self.share_features_extractor:
             self.critic = self.make_critic(features_extractor=self.actor.features_extractor)
@@ -369,6 +372,12 @@ class PMDPolicy(BasePolicy):
         self.actor.set_training_mode(mode)
         self.critic.set_training_mode(mode)
         self.training = mode
+
+    def retain_actor(self):
+        """
+        Deep copy parameters from current actor network to old actor network after each back prop
+        """
+        self.old_actor = copy.deepcopy(self.actor)
 
 
 MlpPolicy = PMDPolicy

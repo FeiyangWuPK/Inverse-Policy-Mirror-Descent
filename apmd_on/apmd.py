@@ -11,7 +11,7 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.sac.policies import CnnPolicy, MlpPolicy, MultiInputPolicy, PMDPolicy
+from .policies import MlpPolicy, CnnPolicy, MultiInputPolicy, PMDPolicy
 
 
 class PMD(OffPolicyAlgorithm):
@@ -83,7 +83,7 @@ class PMD(OffPolicyAlgorithm):
 
     def __init__(
         self,
-        policy: Union[str, Type[PMDPolicy]],
+        policy: Union[str, Type[MlpPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = 1_000_000,  # 1e6
@@ -188,6 +188,7 @@ class PMD(OffPolicyAlgorithm):
 
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
+        self.old_actor = self.policy.old_actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
 
@@ -221,7 +222,7 @@ class PMD(OffPolicyAlgorithm):
 
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None:
-                # Important: detach the variable from the graph
+                # Important: detach the variable from the graph,
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
@@ -256,6 +257,8 @@ class PMD(OffPolicyAlgorithm):
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                # handle average reward
+                target_q_values -= (self.gamma == 1) * self.replay_buffer.rewards.mean()
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
@@ -270,14 +273,18 @@ class PMD(OffPolicyAlgorithm):
             critic_loss.backward()
             self.critic.optimizer.step()
 
+            # Get old actor's action probability
+            _, old_log_prob = self.old_actor.action_log_prob(replay_data.observations)
+
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
             q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             step_size = self.get_step_size()
-            step_size = (step_size / (1+step_size * ent_coef))
-            actor_loss = (ent_coef * log_prob - step_size * min_qf_pi).mean()
+            step_size_q = 1 # (step_size / (1 + step_size))
+            step_size_k = 1 / (1 + step_size * ent_coef)
+            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - step_size_k * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
@@ -299,13 +306,16 @@ class PMD(OffPolicyAlgorithm):
         self.logger.record("train/critic_loss", np.mean(critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
+        
         self.replay_buffer.reset()
+
+        self.policy.retain_actor()
 
     def get_step_size(self) -> float:
         """
         set up step size according to PMD
         """
-        lambda_k = th.exp2(-self.num_timesteps // 10.0)
+        lambda_k = 0.1
         return lambda_k
 
     def learn(
