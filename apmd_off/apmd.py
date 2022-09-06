@@ -91,8 +91,8 @@ class PMD(OffPolicyAlgorithm):
             batch_size: int = 256,
             tau: float = 0.005,
             gamma: float = 0.99,
-            train_freq: Union[int, Tuple[int, str]] = 2048,
-            gradient_steps: int = 10,
+            train_freq: Union[int, Tuple[int, str]] = 1,
+            gradient_steps: int = 1,
             action_noise: Optional[ActionNoise] = None,
             replay_buffer_class: Optional[ReplayBuffer] = None,
             replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
@@ -273,7 +273,7 @@ class PMD(OffPolicyAlgorithm):
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             step_size = self.get_step_size()
             step_size_q = 1  # (step_size / (1 + step_size))
-            step_size_k = 1 / 10.0  # / (1 + step_size * ent_coef)
+            step_size_k = 1.0 / 1e2  # / (1 + step_size * ent_coef)
             actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - ent_coef * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
