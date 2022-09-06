@@ -4,33 +4,31 @@ import gym
 import numpy as np
 import torch as th
 from torch.nn import functional as F
-import copy
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
+from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import polyak_update
-from stable_baselines3.sac.policies import SACPolicy
-from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy
+from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
+from .policies import MlpPolicy, CnnPolicy, MultiInputPolicy, PMDPolicy
 
 
-# from apmd_off.policy import APMDPolicy
-
-
-class APMD(OffPolicyAlgorithm):
+class PMD(OffPolicyAlgorithm):
     """
-    Soft Actor-Critic (SAC)
-    Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
+    Policy Mirror Descent (PMD)
+    On-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
     This implementation borrows code from original implementation (https://github.com/haarnoja/sac)
     from OpenAI Spinning Up (https://github.com/openai/spinningup), from the softlearning repo
     (https://github.com/rail-berkeley/softlearning/)
     and from Stable Baselines (https://github.com/hill-a/stable-baselines)
     Paper: https://arxiv.org/abs/1801.01290
-    Introduction to SAC: https://spinningup.openai.com/en/latest/algorithms/sac.html
+    Introduction to PMD: https://spinningup.openai.com/en/latest/algorithms/sac.html
 
     Note: we use double q target and not value target as discussed
     in https://github.com/hill-a/stable-baselines/issues/270
+
+    ## Notice that it inherited offpolicy algorithm but I modified the learning process so that it reset buffer after policy updates and don't re-sample action from the policy network.
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
@@ -56,7 +54,7 @@ class APMD(OffPolicyAlgorithm):
         at a cost of more complexity.
         See https://github.com/DLR-RM/stable-baselines3/issues/37#issuecomment-637501195
     :param ent_coef: Entropy regularization coefficient. (Equivalent to
-        inverse of reward scale in the original SAC paper.)  Controlling exploration/exploitation trade-off.
+        inverse of reward scale in the original PMD paper.)  Controlling exploration/exploitation trade-off.
         Set it to 'auto' to learn it automatically (and 'auto_0.1' for using 0.1 as initial value)
     :param target_update_interval: update the target network every ``target_network_update_freq``
         gradient steps.
@@ -78,13 +76,14 @@ class APMD(OffPolicyAlgorithm):
     """
 
     policy_aliases: Dict[str, Type[BasePolicy]] = {
-        "MlpPolicy": ActorCriticPolicy,
-        "CnnPolicy": ActorCriticCnnPolicy,
+        "MlpPolicy": MlpPolicy,
+        "CnnPolicy": CnnPolicy,
+        "MultiInputPolicy": MultiInputPolicy,
     }
 
     def __init__(
             self,
-            policy: Union[str, Type[ActorCriticPolicy]],
+            policy: Union[str, Type[MlpPolicy]],
             env: Union[GymEnv, str],
             learning_rate: Union[float, Schedule] = 3e-4,
             buffer_size: int = 1_000_000,  # 1e6
@@ -92,8 +91,8 @@ class APMD(OffPolicyAlgorithm):
             batch_size: int = 256,
             tau: float = 0.005,
             gamma: float = 0.99,
-            train_freq: Union[int, Tuple[int, str]] = 1,
-            gradient_steps: int = 1,
+            train_freq: Union[int, Tuple[int, str]] = 2048,
+            gradient_steps: int = 10,
             action_noise: Optional[ActionNoise] = None,
             replay_buffer_class: Optional[ReplayBuffer] = None,
             replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
@@ -111,14 +110,11 @@ class APMD(OffPolicyAlgorithm):
             seed: Optional[int] = None,
             device: Union[th.device, str] = "auto",
             _init_setup_model: bool = True,
-            tsallis_q=1,
-            t_k = 1.0
     ):
 
-        super(APMD, self).__init__(
+        super().__init__(
             policy,
             env,
-            SACPolicy,
             learning_rate,
             buffer_size,
             learning_starts,
@@ -141,7 +137,7 @@ class APMD(OffPolicyAlgorithm):
             use_sde_at_warmup=use_sde_at_warmup,
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(gym.spaces.Box),
-            support_multi_env=True
+            support_multi_env=True,
         )
 
         self.target_entropy = target_entropy
@@ -151,16 +147,16 @@ class APMD(OffPolicyAlgorithm):
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer = None
-        self.iter = 0
-        self.tsallis_q = tsallis_q
-        self.t_k = t_k
 
         if _init_setup_model:
             self._setup_model()
 
     def _setup_model(self) -> None:
-        super(APMD, self)._setup_model()
+        super()._setup_model()
         self._create_aliases()
+        # Running mean and running var
+        self.batch_norm_stats = get_parameters_by_name(self.critic, ["running_"])
+        self.batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
         # Target entropy is used when learning the entropy coefficient
         if self.target_entropy == "auto":
             # automatically set target entropy if needed
@@ -192,9 +188,9 @@ class APMD(OffPolicyAlgorithm):
 
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
+        self.old_actor = self.policy.old_actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
-        self.old_actor = copy.deepcopy(self.actor)
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
@@ -221,16 +217,9 @@ class APMD(OffPolicyAlgorithm):
             # Action by the current actor for the sampled state
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             log_prob = log_prob.reshape(-1, 1)
-            _, log_prob_old = self.old_actor.action_log_prob(replay_data.observations)
-            log_prob_old = log_prob_old.reshape(-1, 1)
-
-            # K = self._total_timesteps / self.n_steps
-            # print(1 - min(self.iter, K)/K)
-            # t = 1 / (1 -(min(self.iter,K)/K))
-
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None:
-                # Important: detach the variable from the graph
+                # Important: detach the variable from the graph,
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
@@ -258,13 +247,15 @@ class APMD(OffPolicyAlgorithm):
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                # handle average reward
+                target_q_values -= (self.gamma == 1) * self.replay_buffer.rewards.mean()
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
-            critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
+            critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
             critic_losses.append(critic_loss.item())
 
             # Optimize the critic
@@ -272,13 +263,18 @@ class APMD(OffPolicyAlgorithm):
             critic_loss.backward()
             self.critic.optimizer.step()
 
+            # Get old actor's action probability
+            _, old_log_prob = self.old_actor.action_log_prob(replay_data.observations)
+
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
-            # Mean over all critic networks
+            # Min over all critic networks
             q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-            actor_loss = (-log_prob + self.tsallis_q * log_prob_old + self.t_k * min_qf_pi).mean()
-            # actor_loss = (log_prob-min_qf_pi).mean()
+            step_size = self.get_step_size()
+            step_size_q = 1  # (step_size / (1 + step_size))
+            step_size_k = 1 / 10.0  # / (1 + step_size * ent_coef)
+            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - ent_coef * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
@@ -289,15 +285,26 @@ class APMD(OffPolicyAlgorithm):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+                # Copy running stats, see GH issue #996
+                polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+
+        self._n_updates += gradient_steps
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
-        self.logger.record("train/policy_loss", np.mean(actor_losses))
-        self.logger.record("train/value_loss", np.mean(critic_losses))
+        self.logger.record("train/actor_loss", np.mean(actor_losses))
+        self.logger.record("train/critic_loss", np.mean(critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
-        self.iter += 1
+        self.policy.retain_actor()
+
+    def get_step_size(self) -> float:
+        """
+        set up step size according to PMD
+        """
+        lambda_k = 0.1
+        return lambda_k
 
     def learn(
             self,
@@ -307,12 +314,12 @@ class APMD(OffPolicyAlgorithm):
             eval_env: Optional[GymEnv] = None,
             eval_freq: int = -1,
             n_eval_episodes: int = 5,
-            tb_log_name: str = "APMD",
+            tb_log_name: str = "PMD",
             eval_log_path: Optional[str] = None,
             reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
 
-        return super(APMD, self).learn(
+        return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -325,7 +332,7 @@ class APMD(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super(APMD, self)._excluded_save_params() + ["actor", "critic", "critic_target"]
+        return super()._excluded_save_params() + ["actor", "critic", "critic_target"]
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]

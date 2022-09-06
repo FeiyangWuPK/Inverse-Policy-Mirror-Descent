@@ -283,8 +283,8 @@ class PMD(OffPolicyAlgorithm):
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             step_size = self.get_step_size()
             step_size_q = 1 # (step_size / (1 + step_size))
-            step_size_k = 1 / (1 + step_size * ent_coef)
-            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - step_size_k * old_log_prob).mean()
+            step_size_k = 1 / 10.0 # / (1 + step_size * ent_coef)
+            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - ent_coef * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor

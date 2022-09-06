@@ -1,16 +1,13 @@
-"""
-    This file implements a special policy for MDPO, which requires maintaining an old actor policy
-"""
+import copy
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
-import copy 
 
 import gym
 import torch as th
 from torch import nn
 
 from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution, StateDependentNoiseDistribution
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic, register_policy
+from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
     BaseFeaturesExtractor,
@@ -29,7 +26,7 @@ LOG_STD_MIN = -20
 
 class Actor(BasePolicy):
     """
-    Actor network (policy) for MDPO.
+    Actor network (policy) for SAC.
 
     :param observation_space: Obervation space
     :param action_space: Action space
@@ -69,7 +66,7 @@ class Actor(BasePolicy):
         clip_mean: float = 2.0,
         normalize_images: bool = True,
     ):
-        super(Actor, self).__init__(
+        super().__init__(
             observation_space,
             action_space,
             features_extractor=features_extractor,
@@ -189,9 +186,9 @@ class Actor(BasePolicy):
         return self(observation, deterministic)
 
 
-class MDPOPolicy(BasePolicy):
+class PMDPolicy(BasePolicy):
     """
-    Policy class (with both actor and critic) for MDPO.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -239,9 +236,9 @@ class MDPOPolicy(BasePolicy):
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
-        share_features_extractor: bool = True,
+        share_features_extractor: bool = False,
     ):
-        super(MDPOPolicy, self).__init__(
+        super().__init__(
             observation_space,
             action_space,
             features_extractor_class,
@@ -252,10 +249,7 @@ class MDPOPolicy(BasePolicy):
         )
 
         if net_arch is None:
-            if features_extractor_class == NatureCNN:
-                net_arch = []
-            else:
-                net_arch = [256, 256]
+            net_arch = [256, 256]
 
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
 
@@ -290,7 +284,6 @@ class MDPOPolicy(BasePolicy):
         )
 
         self.actor, self.actor_target = None, None
-        self.old_actor, self.old_actor_target = None, None
         self.critic, self.critic_target = None, None
         self.share_features_extractor = share_features_extractor
 
@@ -360,7 +353,10 @@ class MDPOPolicy(BasePolicy):
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        return self._predict(obs, deterministic=deterministic)
+        action, action_prob = self._predict(obs, deterministic=deterministic)
+        value = self.critic(obs, action)
+        log_prob = action_prob(obs)
+        return action, value, log_prob
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         return self.actor(observation, deterministic)
@@ -374,42 +370,22 @@ class MDPOPolicy(BasePolicy):
         :param mode: if true, set to training mode, else set to evaluation mode
         """
         self.actor.set_training_mode(mode)
-        # old_actor always evaluate
-        self.old_actor.set_training_mode(False)
         self.critic.set_training_mode(mode)
         self.training = mode
 
-    def retain_old_actor(self):
+    def retain_actor(self):
         """
         Deep copy parameters from current actor network to old actor network after each back prop
         """
         self.old_actor = copy.deepcopy(self.actor)
 
-    def evaluate_actions_from_old_actor(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-        """
-        Evaluate actions according to the old policy,
-        given the observations.
 
-        :param obs:
-        :param actions:
-        :return: estimated value, log likelihood of taking those actions
-            and entropy of the action distribution.
-        """
-        # Preprocess the observation if needed
-        features = self.extract_features(obs)
-        latent_pi, latent_vf = self.mlp_extractor(features)
-        distribution = self._get_action_dist_from_latent(latent_pi)
-        log_prob = distribution.log_prob(actions)
-        values = self.value_net(latent_vf)
-        return values, log_prob, distribution.entropy()
+MlpPolicy = PMDPolicy
 
 
-MlpPolicy = MDPOPolicy
-
-
-class CnnPolicy(MDPOPolicy):
+class CnnPolicy(PMDPolicy):
     """
-    Policy class (with both actor and critic) for SAC.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -455,9 +431,9 @@ class CnnPolicy(MDPOPolicy):
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
-        share_features_extractor: bool = True,
+        share_features_extractor: bool = False,
     ):
-        super(CnnPolicy, self).__init__(
+        super().__init__(
             observation_space,
             action_space,
             lr_schedule,
@@ -478,9 +454,9 @@ class CnnPolicy(MDPOPolicy):
         )
 
 
-class MultiInputPolicy(MDPOPolicy):
+class MultiInputPolicy(PMDPolicy):
     """
-    Policy class (with both actor and critic) for SAC.
+    Policy class (with both actor and critic) for PMD.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -526,9 +502,9 @@ class MultiInputPolicy(MDPOPolicy):
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
-        share_features_extractor: bool = True,
+        share_features_extractor: bool = False,
     ):
-        super(MultiInputPolicy, self).__init__(
+        super().__init__(
             observation_space,
             action_space,
             lr_schedule,
@@ -547,8 +523,3 @@ class MultiInputPolicy(MDPOPolicy):
             n_critics,
             share_features_extractor,
         )
-
-
-register_policy("MlpPolicy", MlpPolicy)
-register_policy("CnnPolicy", CnnPolicy)
-register_policy("MultiInputPolicy", MultiInputPolicy)
