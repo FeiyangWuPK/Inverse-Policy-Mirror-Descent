@@ -285,6 +285,7 @@ class PMDPolicy(BasePolicy):
 
         self.actor, self.actor_target = None, None
         self.critic, self.critic_target = None, None
+        self.reward_est = None
         self.share_features_extractor = share_features_extractor
 
         self._build(lr_schedule)
@@ -300,11 +301,17 @@ class PMDPolicy(BasePolicy):
             # Do not optimize the shared features extractor with the critic loss
             # otherwise, there are gradient computation issues
             critic_parameters = [param for name, param in self.critic.named_parameters() if "features_extractor" not in name]
+
         else:
             # Create a separate features extractor for the critic
             # this requires more memory and computation
             self.critic = self.make_critic(features_extractor=None)
             critic_parameters = self.critic.parameters()
+
+
+        # Feiyang: add reward function estimator
+        self.reward_est = self.make_reward_est(features_extractor=self.actor.features_extractor)
+        reward_parameters = [param for name, param in self.reward_est.named_parameters() if "features_extractor" not in name]
 
         # Critic target should not share the features extractor with critic
         self.critic_target = self.make_critic(features_extractor=None)
@@ -314,6 +321,9 @@ class PMDPolicy(BasePolicy):
 
         # Target networks should always be in eval mode
         self.critic_target.set_training_mode(False)
+
+        self.reward_est.optimizer = self.optimizer_class(reward_parameters, lr=lr_schedule(1), **self.optimizer_kwargs)
+
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -352,6 +362,16 @@ class PMDPolicy(BasePolicy):
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
+    def make_reward_est(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
+        self.reward_est_kwargs = self.critic_kwargs.copy()
+        self.reward_est_kwargs.update(
+            {
+                "n_critics": 1,
+            }
+        )
+        reward_est_kwargs = self._update_features_extractor(self.reward_est_kwargs, features_extractor)
+        return ContinuousCritic(**reward_est_kwargs).to(self.device)
+
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         action, action_prob = self._predict(obs, deterministic=deterministic)
         value = self.critic(obs, action)
@@ -371,6 +391,7 @@ class PMDPolicy(BasePolicy):
         """
         self.actor.set_training_mode(mode)
         self.critic.set_training_mode(mode)
+        self.reward_est.set_training_mode(mode)
         self.training = mode
 
     def retain_actor(self):
@@ -523,4 +544,3 @@ class MultiInputPolicy(PMDPolicy):
             n_critics,
             share_features_extractor,
         )
-        

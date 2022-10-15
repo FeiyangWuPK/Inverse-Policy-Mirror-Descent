@@ -217,8 +217,6 @@ class PMD(OffPolicyAlgorithm):
             # Action by the current actor for the sampled state
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             log_prob = log_prob.reshape(-1, 1)
-            next_actions1, next_log_prob1 = actions_pi.clone(), log_prob.clone()
-            
 
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None:
@@ -243,13 +241,6 @@ class PMD(OffPolicyAlgorithm):
             with th.no_grad():
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                next_actions1[:-1] = actions_pi[1:]
-                next_log_prob1[:-1] = log_prob[1:]
-
-                next_actions1[-1] = next_actions[-1]
-                next_log_prob1[-1] = next_log_prob[-1]
-                
-                next_actions, next_log_prob = next_actions1, next_log_prob1
                 # Compute the next Q values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
@@ -282,9 +273,9 @@ class PMD(OffPolicyAlgorithm):
             q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             step_size = self.get_step_size()
-            step_size_q = 1 # (step_size / (1 + step_size))
-            step_size_k = 1 / 10.0 # / (1 + step_size * ent_coef)
-            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - ent_coef * old_log_prob).mean()
+            step_size_q = 1.0
+            step_size_k = ent_coef / 10.0
+            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - step_size_k * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
