@@ -315,19 +315,20 @@ class IPMD(OffPolicyAlgorithm):
 
             self.actor.optimizer.step()
 
-            if (self._n_updates + 1) % 5 == 0:
+            if (self._n_updates + 1) % 1 == 0:
                 self.reward_update_iter += 1
                 # Get expert reward estimation
                 expert_estimated_rewards = th.cat(self.reward_est(self.expert_replay_data.observations, self.expert_replay_data.actions), dim=1)
 
-                alpha = 0.5
+                alpha = 0.001
                 if self.replay_buffer.pos > 10000:
                     estimated_rewards = th.cat(self.reward_est(resampled_data.observations, resampled_action), dim=1)
                 else:
                     estimated_rewards = th.cat(self.reward_est(replay_data.observations, actions_copy), dim=1)
                 self.estimated_average_reward = estimated_rewards.mean().detach()
                 # print(estimated_rewards.mean(), expert_estimated_rewards.mean())
-                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * th.sqrt(sum(estimated_rewards ** 2))# + alpha * th.sqrt(sum(expert_estimated_rewards ** 2))
+                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * sum(sum(expert_estimated_rewards ** 2) + sum(estimated_rewards ** 2))
+                                # + alpha * sum(estimated_rewards ** 2) 
 
                 reward_est_losses.append(reward_est_loss.item())
                 self.reward_est.optimizer.zero_grad()
