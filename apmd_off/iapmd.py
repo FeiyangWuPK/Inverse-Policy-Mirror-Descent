@@ -225,6 +225,7 @@ class IPMD(OffPolicyAlgorithm):
         actor_losses, critic_losses = [], []
         reward_est_losses = []
         reward_est_eval_losses = []
+        average_reward_list = []
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
@@ -305,8 +306,8 @@ class IPMD(OffPolicyAlgorithm):
             # step_size = self.get_step_size()
             # step_size_q = 1.0 / (1.0 - ent_coef)
             # step_size_k = 1.0 / (1.0 - ent_coef)
-            # actor_loss = (ent_coef * log_prob -  min_qf_pi - ent_coef * old_log_prob).mean()
-            actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+            actor_loss = (ent_coef * log_prob -  min_qf_pi - ent_coef * old_log_prob).mean()
+            # actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
@@ -320,14 +321,17 @@ class IPMD(OffPolicyAlgorithm):
                 # Get expert reward estimation
                 expert_estimated_rewards = th.cat(self.reward_est(self.expert_replay_data.observations, self.expert_replay_data.actions), dim=1)
 
-                alpha = 0.001
+                alpha = 0.5
                 if self.replay_buffer.pos > 10000:
                     estimated_rewards = th.cat(self.reward_est(resampled_data.observations, resampled_action), dim=1)
                 else:
                     estimated_rewards = th.cat(self.reward_est(replay_data.observations, actions_copy), dim=1)
                 self.estimated_average_reward = estimated_rewards.mean().detach()
+                average_reward_list.append(self.estimated_average_reward)
                 # print(estimated_rewards.mean(), expert_estimated_rewards.mean())
-                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * sum(sum(expert_estimated_rewards ** 2) + sum(estimated_rewards ** 2))
+                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * th.sqrt(estimated_rewards.mean() ** 2 + expert_estimated_rewards.mean() ** 2)
+
+                #alpha * (th.linalg.norm(estimated_rewards) + th.linalg.norm(expert_estimated_rewards))
                                 # + alpha * sum(estimated_rewards ** 2) 
 
                 reward_est_losses.append(reward_est_loss.item())
@@ -349,10 +353,12 @@ class IPMD(OffPolicyAlgorithm):
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
         self.logger.record("train/reward_est_loss", np.mean(reward_est_losses))
+        if self.gamma == 1:
+            self.logger.record("train/average_reward", np.mean(average_reward_list))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
-        # self.policy.retain_actor()
+        self.policy.retain_actor()
 
     def get_step_size(self) -> float:
         """

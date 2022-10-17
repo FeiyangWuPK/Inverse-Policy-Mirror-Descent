@@ -1,4 +1,5 @@
 import os
+import datetime
 
 import gym
 from matplotlib import pyplot as plt
@@ -37,18 +38,17 @@ def run_on_policy_pmd(env_id='HalfCheetah-v4'):
     ipmd_model.learn(total_timesteps=1e6, log_interval=10, )
 
 def run_off_policy_pmd(env_id):
-    env_id = 'HalfCheetah-v4'
-    expert_samples_replay_buffer_loc = "logs/HalfCheetah-v4-sac-buffer.pkl"
+    expert_samples_replay_buffer_loc = f"utils/logs/expert/{env_id}-sac/buffer.pkl"
 
     env = make_vec_env(env_id, n_envs=1)
     ipmd_model = IPMD_OFF("MlpPolicy", env, gamma=1.0, verbose=1, batch_size=256, train_freq=1, learning_rate=linear_schedule(5e-3), gradient_steps=1,expert_replay_buffer_loc=expert_samples_replay_buffer_loc)
 
     eval_env = make_vec_env(env_id, n_envs=1)
-    eval_callback = EvalCallback(eval_env, best_model_save_path='logs/{}-apmd-off-sep19/'.format(env_id),
-                                log_path='logs/{}-apmd-off-sep19/'.format(env_id), eval_freq=1000,
-                                deterministic=False, render=False)
-
-    ipmd_model.learn(total_timesteps=1e6, log_interval=1, callback=eval_callback)
+    logtime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    eval_callback = EvalCallback(eval_env, best_model_save_path=f'logs/{env_id}-iapmd-{logtime}/',
+                             log_path=f'logs/{env_id}-iapmd-{logtime}/', eval_freq=1000,
+                             deterministic=True, render=False)
+    ipmd_model.learn(total_timesteps=1e6, log_interval=10, callback=eval_callback)
 
 if __name__ == "__main__":
-    run_off_policy_pmd(env_id='HalfCheetah-v4')
+    run_off_policy_pmd(env_id='Hopper-v4')
