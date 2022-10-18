@@ -130,4 +130,6 @@ dmypy.json
 
 .idea/
 
-logs/
+logs/*
+logs/*/*
+utils/logs/*

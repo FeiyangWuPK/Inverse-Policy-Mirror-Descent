@@ -233,7 +233,7 @@ class IPMD(OffPolicyAlgorithm):
 
             if self.replay_buffer.pos > 10000:
                 # resampled_data = self.replay_buffer.sample(10000)
-                resampled_data = self.expert_replay_buffer._get_samples(np.arange(self.replay_buffer.size() - 10000, self.replay_buffer.size() - 1))
+                resampled_data = self.replay_buffer.sample(10000, env=self._vec_normalize_env)
                 resampled_action, _ = self.actor.action_log_prob(resampled_data.observations)
                 resampled_action = resampled_action.detach()
 
@@ -267,6 +267,7 @@ class IPMD(OffPolicyAlgorithm):
                 self.ent_coef_optimizer.step()
 
             estimated_rewards = th.cat(self.reward_est(replay_data.observations, actions_pi), dim=1).detach()
+            self.estimated_average_reward = estimated_rewards.mean().detach()
 
             # print(estimated_rewards_detached)
             with th.no_grad():
@@ -326,12 +327,12 @@ class IPMD(OffPolicyAlgorithm):
                     estimated_rewards = th.cat(self.reward_est(resampled_data.observations, resampled_action), dim=1)
                 else:
                     estimated_rewards = th.cat(self.reward_est(replay_data.observations, actions_copy), dim=1)
-                self.estimated_average_reward = estimated_rewards.mean().detach()
+                
                 average_reward_list.append(self.estimated_average_reward)
                 # print(estimated_rewards.mean(), expert_estimated_rewards.mean())
-                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * th.sqrt(estimated_rewards.mean() ** 2 + expert_estimated_rewards.mean() ** 2)
+                # reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * th.sqrt(estimated_rewards.mean() ** 2 + expert_estimated_rewards.mean() ** 2)
 
-                #alpha * (th.linalg.norm(estimated_rewards) + th.linalg.norm(expert_estimated_rewards))
+                reward_est_loss = estimated_rewards.mean() - expert_estimated_rewards.mean() + alpha * (th.linalg.norm(estimated_rewards) + th.linalg.norm(expert_estimated_rewards))
                                 # + alpha * sum(estimated_rewards ** 2) 
 
                 reward_est_losses.append(reward_est_loss.item())
