@@ -133,3 +133,4 @@ dmypy.json
 logs/*
 logs/*/*
 utils/logs/*
+expert_trajectories/*

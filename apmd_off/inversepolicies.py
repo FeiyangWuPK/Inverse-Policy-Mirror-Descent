@@ -322,7 +322,7 @@ class PMDPolicy(BasePolicy):
         # Target networks should always be in eval mode
         self.critic_target.set_training_mode(False)
 
-        self.reward_est.optimizer = self.optimizer_class(reward_parameters, lr=lr_schedule(5e-3), **self.optimizer_kwargs)
+        self.reward_est.optimizer = self.optimizer_class(reward_parameters, lr=lr_schedule(5e-4), **self.optimizer_kwargs)
 
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:

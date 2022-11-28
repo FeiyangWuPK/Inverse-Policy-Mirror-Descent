@@ -248,7 +248,7 @@ class PMD(OffPolicyAlgorithm):
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
                 # handle average reward
-                target_q_values -= (self.gamma == 1) * self.replay_buffer.rewards.mean()
+                target_q_values -= (self.gamma == 1) * replay_data.rewards.mean()
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
@@ -274,7 +274,7 @@ class PMD(OffPolicyAlgorithm):
             step_size = self.get_step_size()
             step_size_q = 1  # (step_size / (1 + step_size))
             step_size_k = ent_coef / 10.0
-            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - step_size_k * old_log_prob).mean()
+            actor_loss = (ent_coef * log_prob - step_size_q * min_qf_pi - 0 * old_log_prob).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor

@@ -47,8 +47,8 @@ def plot_costs_with_band(rewards, names, smoothing_window=10, n=3, fig_name="acr
 env_names = ['HalfCheetah-v2', 'Hopper-v2', 'Walker2d-v2', 'Humanoid-v2',]
 for env_name in env_names:
     if env_name == 'HalfCheetah-v2':
-        ppo_mean = np.load('logs/HalfCheetah-v2-ppo-mean.npy')[:n_episodes]
-        ppo_std = np.load('logs/HalfCheetah-v2-ppo-std.npy')[:n_episodes]
+        ppo_mean = np.load('logs-old/HalfCheetah-v2-ppo-mean.npy')[:n_episodes]
+        ppo_std = np.load('logs-old/HalfCheetah-v2-ppo-std.npy')[:n_episodes]
     else:
         ppo_result = np.load('logs/'+env_name+'-ppo/evaluations.npz')['results']
         ppo_mean = np.mean(ppo_result, axis=1)[:n_episodes]
